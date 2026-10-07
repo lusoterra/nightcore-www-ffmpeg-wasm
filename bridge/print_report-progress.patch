@@ -1,0 +1,40 @@
+--- a/fftools/ffmpeg.c
++++ b/fftools/ffmpeg.c
+@@ -24,6 +24,10 @@
+  */
+ 
+ #include "config.h"
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten/emscripten.h>
++#endif
+ #include <ctype.h>
+ #include <string.h>
+ #include <math.h>
+@@ -1708,6 +1712,26 @@
+         }
+     }
+ 
++#ifdef __EMSCRIPTEN__
++    /* nightcore-www: push time-based progress to JS (Module["progress"]).
++     * Total duration comes from the inputs, so the ratio is exact.
++     * Applied by build.sh; fails loudly on drift. */
++    {
++        double total_dur = 0;
++        for (int i = 0; i < nb_input_files; i++) {
++            int64_t d = input_files[i]->ctx->duration;
++            if (d != AV_NOPTS_VALUE && d > 0 && (double)d > total_dur)
++                total_dur = (double)d;
++        }
++        if (total_dur > 0) {
++            double ratio = (double)cur_time / total_dur;
++            if (ratio < 0) ratio = 0;
++            if (ratio > 1) ratio = 1;
++            EM_ASM({ receiveProgress($0, $1); }, ratio, (double)cur_time);
++        }
++    }
++#endif
++
+     first_report = 0;
+ 
+     if (is_last_report)

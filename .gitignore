@@ -1,0 +1,10 @@
+# emsdk toolchain, downloaded sources, install prefix, build logs,
+# and built engine binaries. Rebuilt from versions.env pins via
+# build.sh -- nothing here is source.
+# (Copy build/ffmpeg-core.js + build/ffmpeg-core.wasm into the
+# website's public/core/ to ship them.)
+/emsdk/
+/src/
+/prefix/
+/build/
+build.log

@@ -1,0 +1,25 @@
+--- a/fftools/ffmpeg.c
++++ b/fftools/ffmpeg.c
+@@ -655,6 +655,22 @@
+     } else if (ret && atomic_load(&transcode_init_done)) {
+         av_log(NULL, AV_LOG_INFO, "Conversion failed!\n");
+     }
++    /* nightcore-www: zero freed-array counters so main() can run
++     * again in-process (wasm exec). Without this, run 2 indexes
++     * stale counts into NULL arrays and traps. Applied by
++     * build.sh; fails loudly on drift. */
++    nb_filtergraphs = 0;
++    nb_input_files = 0;
++    nb_input_streams = 0;
++    nb_output_files = 0;
++    nb_output_streams = 0;
++    nb_output_dumped = 0;
++    nb_frames_dup = 0;
++    nb_frames_drop = 0;
++    decode_error_stat[0] = decode_error_stat[1] = 0;
++    main_return_code = 0;
++    received_sigterm = 0;
++    received_nb_signals = 0;
+     term_exit();
+     ffmpeg_exited = 1;
+ }
