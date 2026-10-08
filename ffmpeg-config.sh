@@ -17,6 +17,7 @@ CONFIGURE_FLAGS=(
   --disable-everything
   --enable-gpl
   --enable-libmp3lame --enable-libopus --enable-librubberband
+  --enable-libsoxr
   --enable-zlib
   --pkg-config-flags=--static
 
@@ -29,11 +30,14 @@ CONFIGURE_FLAGS=(
 
   # decoders (native; lame/opus libs are encode-side)
   --enable-decoder=pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_u8,flac,mp3float,aac,alac,opus,vorbis,mjpeg,png
-  # encoders: site outputs only
-  --enable-encoder=flac,libmp3lame,libopus,alac
+  # encoders: site outputs only, plus float PCM for the pitch
+  # anti-clip temp (rubberband can overshoot 0dBFS; the float temp
+  # preserves overs for measurement, exactly like the CLI tame step)
+  --enable-encoder=flac,libmp3lame,libopus,alac,pcm_f32le
   # filters: nightcore chain only (+atempo fallback when rubberband is off).
   # aformat+anull are mandatory: ffmpeg auto-inserts them to negotiate
   # formats between filters and encoders -- without them EVERY graph
-  # fails with "not connected".
-  --enable-filter=aresample,asetrate,atempo,rubberband,aformat,anull
+  # fails with "not connected". volume applies the measured anti-clip
+  # trim on hot pitch renders (CLI tame_hot_wav parity).
+  --enable-filter=aresample,asetrate,atempo,rubberband,aformat,anull,volume
 )

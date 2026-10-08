@@ -1,0 +1,67 @@
+--- a/src/fft4g32.c
++++ b/src/fft4g32.c
+@@ -9,25 +9,30 @@
+ 
+ #if WITH_CR32
+ #include "rdft_t.h"
+-static void * null(void) {return 0;}
+-static void forward (int length, void * setup, double * H) {lsx_safe_rdft_f(length,  1, H); (void)setup;}
+-static void backward(int length, void * setup, double * H) {lsx_safe_rdft_f(length, -1, H); (void)setup;}
++/* NB: wasm call_indirect type-checks every signature (native code
++ * tolerates the arity mismatches); these shims match the rdft_t.h
++ * cast arities exactly. Behaviour unchanged. */
++static void * null1(int n) {(void)n; return 0;}
++static void forward (int length, void * setup, float * H, void * scratch) {lsx_safe_rdft_f(length,  1, H); (void)setup; (void)scratch;}
++static void backward(int length, void * setup, float * H, void * scratch) {lsx_safe_rdft_f(length, -1, H); (void)setup; (void)scratch;}
+ static int multiplier(void) {return 2;}
+-static void nothing(void) {}
++static void nothing1(void * p) {(void)p;}
++static void nothing4(int n, void * a, void * b, void * c) {(void)n; (void)a; (void)b; (void)c;}
++static void pconvolve(int n, void * a, void const * b) {lsx_ordered_partial_convolve_f(n, (float *)a, (float const *)b);}
+ static int flags(void) {return 0;}
+ 
+ fn_t _soxr_rdft32_cb[] = {
+-  (fn_t)null,
+-  (fn_t)null,
+-  (fn_t)nothing,
++  (fn_t)null1,
++  (fn_t)null1,
++  (fn_t)nothing1,
+   (fn_t)forward,
+   (fn_t)forward,
+   (fn_t)backward,
+   (fn_t)backward,
+   (fn_t)_soxr_ordered_convolve_f,
+-  (fn_t)_soxr_ordered_partial_convolve_f,
++  (fn_t)pconvolve,
+   (fn_t)multiplier,
+-  (fn_t)nothing,
++  (fn_t)nothing4,
+   (fn_t)malloc,
+   (fn_t)calloc,
+   (fn_t)free,
+--- a/src/fft4g64.c
++++ b/src/fft4g64.c
+@@ -7,10 +7,18 @@
+ #include "soxr-config.h"
+ 
+ #if WITH_CR64
+-static void * null(void) {return 0;}
+-static void nothing(void) {}
+-static void forward (int length, void * setup, double * H) {lsx_safe_rdft(length,  1, H); (void)setup;}
+-static void backward(int length, void * setup, double * H) {lsx_safe_rdft(length, -1, H); (void)setup;}
++/* NB: same wasm indirect-call arity fix as fft4g32.c: these shims
++ * match the rdft_t.h cast arities exactly (extra args ignored). */
++static void * null1(int n) {(void)n; return 0;}
++static void nothing1(void * p) {(void)p;}
++static void nothing4(int n, void * a, void * b, void * c)
++  {(void)n; (void)a; (void)b; (void)c;}
++static void forward (int length, void * setup, double * H, void * scratch)
++  {lsx_safe_rdft(length,  1, H); (void)setup; (void)scratch;}
++static void backward(int length, void * setup, double * H, void * scratch)
++  {lsx_safe_rdft(length, -1, H); (void)setup; (void)scratch;}
++static void pconvolve(int n, void * a, void const * b)
++  {lsx_ordered_partial_convolve(n, (double *)a, (double const *)b);}
+ static int multiplier(void) {return 2;}
+ static int flags(void) {return 0;}
+ 

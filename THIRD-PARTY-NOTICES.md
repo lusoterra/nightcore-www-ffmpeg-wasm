@@ -10,6 +10,9 @@
   Source: https://downloads.xiph.org/releases/opus/
 - libogg (https://xiph.org/ogg/) -- 3-clause BSD license.
   Source: https://downloads.xiph.org/releases/ogg/
+- SoX Resampler Library / libsoxr (https://sourceforge.net/projects/soxr/)
+  -- GNU Lesser General Public License v2.1 (all resampling jobs).
+  Source: https://downloads.sourceforge.net/project/soxr/
 - zlib (https://zlib.net) -- zlib license.
   Source: https://github.com/madler/zlib
 - music-metadata (https://github.com/borewit/music-metadata)

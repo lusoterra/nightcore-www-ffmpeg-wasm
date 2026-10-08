@@ -1,7 +1,8 @@
 #!/bin/bash
 # Custom ffmpeg-core.wasm (+js glue) for nightcore-www.
 # Stock @ffmpeg/core lacks the rubberband filter; this adds exactly that
-# (--enable-librubberband). SoXR ("sox" resampling) is already in ffmpeg.
+# (--enable-librubberband) plus the SoX resampler (--enable-libsoxr,
+# selected via aresample ...:resampler=soxr).
 # Single-threaded: no COOP/COEP headers needed on the server.
 # Idempotent: finished steps are marked in prefix/ and skipped on rerun.
 set -euo pipefail
@@ -88,10 +89,31 @@ autoconf_lib opus "$OPUS_VERSION" \
   "https://downloads.xiph.org/releases/opus/opus-$OPUS_VERSION.tar.gz" \
   --disable-asm --disable-rtcd --disable-doc --disable-extra-programs --disable-stack-protector --enable-fixed-point --enable-fixed-point
 
-# NOTE: libsoxr was dropped: it traps under wasm (verified in isolation),
-# and the -R settle step uses ffmpeg's native swr resampler instead,
-# which is transparent for a final 44.1k->48k-style settle. Speed stays
-# bit-perfect (no resampling at all); pitch is real rubberband.
+# SoX Resampler Library (libsoxr): the "sox" resampling engine behind
+# aresample ...:resampler=soxr (every resample/prescale/settle step).
+# Needs bridge/soxr-wasm-sigmatch.patch: upstream's DFT callback
+# tables call 0/3-arg functions through 1/4-arg casts -- legal C, but
+# wasm call_indirect type-checks every signature and traps. The patch
+# adds exact-arity shims (behaviour unchanged). Scalar code paths:
+# soxr's cmake SIMD probe fails under emcc, so no vector code ships.
+# No threads (-pthread-free core), no LSR bindings, no tests/examples.
+echo "==> soxr $SOXR_VERSION"
+done_mark soxr || {
+  if [ ! -f "$SRC/soxr-$SOXR_VERSION-Source/.patched-sigmatch" ]; then
+    rm -rf "$SRC/soxr-$SOXR_VERSION-Source"
+    curl -fSL "https://downloads.sourceforge.net/project/soxr/soxr-$SOXR_VERSION-Source.tar.xz" | tar -xJ -C "$SRC"
+    (cd "$SRC/soxr-$SOXR_VERSION-Source" && patch -p1 --forward < "$ROOT/bridge/soxr-wasm-sigmatch.patch") \
+      && touch "$SRC/soxr-$SOXR_VERSION-Source/.patched-sigmatch"
+  fi
+  rm -rf "$SRC/soxr-$SOXR_VERSION-Source/build" # stale native/vendor-era dir
+  (cd "$SRC" && emcmake cmake -S "soxr-$SOXR_VERSION-Source" -B "soxr-$SOXR_VERSION-Source/build-wasm" \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+    -DWITH_OPENMP=OFF -DWITH_LSR_BINDINGS=OFF -DWITH_DEV_TRACE=OFF -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_C_FLAGS="-O3" >/dev/null \
+    && emmake make -C "soxr-$SOXR_VERSION-Source/build-wasm" -j"$JOBS" >/dev/null \
+    && emmake make -C "soxr-$SOXR_VERSION-Source/build-wasm" install >/dev/null)
+  mark soxr
+}
 
 echo "==> rubberband $RUBBERBAND_VERSION (single-file amalgamation, no meson needed)"
 done_mark rubberband || {
@@ -148,7 +170,7 @@ emcc -c "$ROOT/bridge/bridge.c" $CFLAGS -Qunused-arguments -o "$FF_O/bridge.o"
   -Llibavcodec -Llibavdevice -Llibavfilter -Llibavformat -Llibavutil -Llibswscale -Llibswresample -Llibpostproc -L"$PREFIX/lib" \
   -Qunused-arguments \
   -lavdevice -lavfilter -lavformat -lavcodec -lswscale -lswresample -lavutil -lpostproc \
-  -lmp3lame -lopus -logg -lrubberband -lc++ -lc++abi -lz -lm \
+  -lmp3lame -lopus -logg -lsoxr -lrubberband -lc++ -lc++abi -lz -lm \
   "$FF_O"/*.o \
   -s INVOKE_RUN=0 -s EXIT_RUNTIME=1 -s MODULARIZE=1 \
   -s EXPORT_NAME=createFFmpegCore \
