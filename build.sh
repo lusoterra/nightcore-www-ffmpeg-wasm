@@ -146,6 +146,10 @@ if [ ! -f "$SRC/ffmpeg/.patched-rerun" ]; then
   (cd "$SRC/ffmpeg" && patch -p1 --forward < "$ROOT/bridge/ffmpeg-rerun-reset.patch") \
     && touch "$SRC/ffmpeg/.patched-rerun"
 fi
+if [ ! -f "$SRC/ffmpeg/.patched-rb-offline" ]; then
+  (cd "$SRC/ffmpeg" && patch -p1 --forward < "$ROOT/bridge/af-rubberband-cli-parity.patch") \
+    && touch "$SRC/ffmpeg/.patched-rb-offline"
+fi
 # shellcheck disable=SC1091
 source ffmpeg-config.sh # sets CONFIGURE_FLAGS
 (cd "$SRC/ffmpeg" && emconfigure ./configure "${CONFIGURE_FLAGS[@]}" \
@@ -156,6 +160,9 @@ source ffmpeg-config.sh # sets CONFIGURE_FLAGS
 
 echo "==> link ffmpeg-core.js/wasm"
 mkdir -p "$OUT"
+# NOTE: 2GB MAXIMUM_MEMORY below (not the old 1GB): offline R3 pitch
+# jobs buffer the whole track as float frames plus the stretcher's own
+# study buffers (~3-4x a long track). Growth keeps small jobs lean.
 FF_O="$SRC/ffmpeg/fftools-objs"; mkdir -p "$FF_O"
 FF_CFLAGS=(-I. -I./fftools -I"$PREFIX/include" -Qunused-arguments -O3)
 FF_TOOLS_NO_MAIN=(fftools/cmdutils.c fftools/ffmpeg_opt.c fftools/ffmpeg_filter.c fftools/ffmpeg_hw.c fftools/ffmpeg_mux.c fftools/opt_common.c)
@@ -176,7 +183,7 @@ emcc -c "$ROOT/bridge/bridge.c" $CFLAGS -Qunused-arguments -o "$FF_O/bridge.o"
   -s EXPORT_NAME=createFFmpegCore \
   -s "EXPORTED_FUNCTIONS=[_ffmpeg,_ffprobe,_malloc]" \
   -s "EXPORTED_RUNTIME_METHODS=[FS, cwrap, ccall, setValue, writeAsciiToMemory, lengthBytesUTF8, stringToUTF8, UTF8ToString]" \
-  -s INITIAL_MEMORY=33554432 -s MAXIMUM_MEMORY=1073741824 -s ALLOW_MEMORY_GROWTH=1 \
+  -s INITIAL_MEMORY=33554432 -s MAXIMUM_MEMORY=2147483648 -s ALLOW_MEMORY_GROWTH=1 \
   --pre-js "$ROOT/bridge/prelude.js" \
   -Wl,--wrap=exit \
   -O3 -o "$OUT/ffmpeg-core.js")

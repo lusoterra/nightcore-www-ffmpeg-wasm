@@ -1,0 +1,240 @@
+--- a/libavfilter/af_rubberband.c
++++ b/libavfilter/af_rubberband.c
+@@ -35,6 +35,22 @@
+     double tempo, pitch;
+     int transients, detector, phase, window,
+         smoothing, formant, opitch, channels;
++    int engine;    // RubberBandOptionEngineFaster | RubberBandOptionEngineFiner
++    int offline;   // two-pass offline mode (study whole input first)
++
++    // Offline two-pass state: every input frame is queued until input
++    // EOF, then the queue is studied and processed in order -- the
++    // rubberband CLI (`rubberband -3`) flow, i.e. whole-file analysis
++    // before a single output sample. Realtime mode keeps the original
++    // streaming path untouched.
++    AVFrame **queue;
++    unsigned nb_queue;
++    unsigned alloc_queue;
++    unsigned queue_pos;  // next queued frame to process
++    int64_t expected_in; // total queued sample frames
++    int eof_in;          // input EOF seen, queue complete
++    int studied;         // study pass done
++    int eof_out;         // output EOF forwarded downstream
+     int64_t nb_samples_out;
+     int64_t nb_samples_in;
+     int64_t first_pts;
+@@ -76,6 +92,10 @@
+     { "channels",   "set channels",   OFFSET(channels),   AV_OPT_TYPE_INT, {.i64=0}, 0, INT_MAX, A, "channels" },
+         { "apart",    0,              0,                  AV_OPT_TYPE_CONST, {.i64=RubberBandOptionChannelsApart},    0, 0, A, "channels" },
+         { "together", 0,              0,                  AV_OPT_TYPE_CONST, {.i64=RubberBandOptionChannelsTogether}, 0, 0, A, "channels" },
++    { "engine",     "select rubberband engine", OFFSET(engine), AV_OPT_TYPE_INT, {.i64=RubberBandOptionEngineFaster}, 0, INT_MAX, A, "engine" },
++        { "faster", 0,                0,                  AV_OPT_TYPE_CONST, {.i64=RubberBandOptionEngineFaster}, 0, 0, A, "engine" },
++        { "finer",  0,                0,                  AV_OPT_TYPE_CONST, {.i64=RubberBandOptionEngineFiner},  0, 0, A, "engine" },
++    { "offline",    "two-pass offline mode: study the whole input before processing (rubberband CLI parity)", OFFSET(offline), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, A },
+     { NULL },
+ };
+ 
+@@ -87,6 +107,13 @@
+ 
+     if (s->rbs)
+         rubberband_delete(s->rbs);
++    s->rbs = NULL;
++    if (s->queue) {
++        for (unsigned i = 0; i < s->nb_queue; i++)
++            av_frame_free(&s->queue[i]);
++        av_freep(&s->queue);
++    }
++    s->nb_queue = s->alloc_queue = s->queue_pos = 0;
+ }
+ 
+ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
+@@ -125,13 +152,122 @@
+     return ret < 0 ? ret : nb_samples;
+ }
+ 
++// Offline phase 1: queue every input frame until input EOF. Returns 1
++// when frames were queued, 0 when blocked waiting for input, <0 on
++// error. The held input EOF is only forwarded downstream once the
++// study+process passes have fully drained (see activate).
++static int offline_queue_input(AVFilterLink *inlink)
++{
++    AVFilterContext *ctx = inlink->dst;
++    RubberBandContext *s = ctx->priv;
++    int progress = 0;
++
++    for (;;) {
++        AVFrame *in = NULL;
++        int ret = ff_inlink_consume_samples(inlink, 1, s->nb_samples ? s->nb_samples : 16384, &in);
++        if (ret < 0)
++            return ret;
++        if (!ret)
++            break;
++        if (s->nb_queue == s->alloc_queue) {
++            unsigned nalloc = s->alloc_queue ? s->alloc_queue * 2 : 64;
++            AVFrame **nq = av_realloc_array(s->queue, nalloc, sizeof(*nq));
++            if (!nq) {
++                av_frame_free(&in);
++                return AVERROR(ENOMEM);
++            }
++            s->queue = nq;
++            s->alloc_queue = nalloc;
++        }
++        if (s->first_pts == AV_NOPTS_VALUE)
++            s->first_pts = in->pts;
++        s->expected_in += in->nb_samples;
++        s->queue[s->nb_queue++] = in;
++        progress = 1;
++    }
++
++    {
++        int status;
++        int64_t pts;
++        if (ff_inlink_acknowledge_status(inlink, &status, &pts) &&
++            status == AVERROR_EOF)
++            s->eof_in = 1;
++    }
++    return progress;
++}
++
++// Offline phase 2a: study pass over the queued input in order.
++static void offline_study(AVFilterContext *ctx)
++{
++    RubberBandContext *s = ctx->priv;
++
++    // Lets the stretcher size its buffers and hit the exact output
++    // length.
++    rubberband_set_expected_input_duration(s->rbs, (unsigned)s->expected_in);
++    for (unsigned i = 0; i < s->nb_queue; i++) {
++        AVFrame *in = s->queue[i];
++        rubberband_study(s->rbs, (const float *const *)in->data,
++                         in->nb_samples, i == s->nb_queue - 1);
++    }
++    s->studied = 1;
++}
++
++// Offline phase 2b: process the next queued frame (freeing it) and emit
++// one output frame when the stretcher has samples ready. Returns 1 on
++// progress, 0 once the queue is exhausted and the stretcher is drained.
++static int offline_emit(AVFilterLink *inlink)
++{
++    AVFilterContext *ctx = inlink->dst;
++    RubberBandContext *s = ctx->priv;
++    AVFilterLink *outlink = ctx->outputs[0];
++    AVFrame *out;
++    int nb_samples, ret = 0;
++
++    if (s->queue_pos < s->nb_queue) {
++        AVFrame *in = s->queue[s->queue_pos];
++        int last = s->queue_pos == s->nb_queue - 1;
++        rubberband_process(s->rbs, (const float *const *)in->data,
++                           in->nb_samples, last);
++        s->nb_samples_in += in->nb_samples;
++        av_frame_free(&in);
++        s->queue[s->queue_pos++] = NULL;
++    }
++
++    nb_samples = rubberband_available(s->rbs);
++    if (nb_samples > 0) {
++        out = ff_get_audio_buffer(outlink, nb_samples);
++        if (!out)
++            return AVERROR(ENOMEM);
++        out->pts = s->first_pts + av_rescale_q(s->nb_samples_out,
++                     (AVRational){ 1, outlink->sample_rate },
++                     outlink->time_base);
++        nb_samples = rubberband_retrieve(s->rbs, (float *const *)out->data, nb_samples);
++        out->nb_samples = nb_samples;
++        ret = ff_filter_frame(outlink, out);
++        if (ret < 0)
++            return ret;
++        s->nb_samples_out += nb_samples;
++        return 1;
++    }
++
++    // No output ready: progress only while unprocessed input remains.
++    return s->queue_pos < s->nb_queue;
++}
++
+ static int config_input(AVFilterLink *inlink)
+ {
+     AVFilterContext *ctx = inlink->dst;
+     RubberBandContext *s = ctx->priv;
+     int opts = s->transients|s->detector|s->phase|s->window|
+-               s->smoothing|s->formant|s->opitch|s->channels|
+-               RubberBandOptionProcessRealTime;
++               s->smoothing|s->formant|s->opitch|s->channels|s->engine|
++               (s->offline ? RubberBandOptionProcessOffline
++                           : RubberBandOptionProcessRealTime);
++
++    if (s->offline)
++        // Single-threaded wasm core: never spawn worker threads (the
++        // native CLI uses them when available; output is identical,
++        // scheduling is not).
++        opts |= RubberBandOptionThreadingNever;
+ 
+     if (s->rbs)
+         rubberband_delete(s->rbs);
+@@ -141,6 +277,9 @@
+ 
+     s->nb_samples = rubberband_get_samples_required(s->rbs);
+     s->first_pts = AV_NOPTS_VALUE;
++    s->nb_queue = s->alloc_queue = s->queue_pos = 0;
++    s->expected_in = 0;
++    s->eof_in = s->studied = s->eof_out = 0;
+ 
+     return 0;
+ }
+@@ -155,6 +294,44 @@
+ 
+     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
+ 
++    if (s->offline) {
++        if (s->eof_out)
++            return FFERROR_NOT_READY;
++        // Demand upstream while buffering (no early return: the macro
++        // would return 0 immediately while downstream is hungry, and the
++        // scheduler would re-invoke us in a tight no-op loop, starving
++        // the decoder -- that was a real 99%-CPU hang).
++        if (ff_outlink_frame_wanted(outlink))
++            ff_inlink_request_frame(inlink);
++        if (!s->eof_in) {
++            ret = offline_queue_input(inlink);
++            if (ret < 0)
++                return ret;
++            if (!s->eof_in) {
++                // Returning 0 alone does not reschedule us: without new
++                // input events the filter sleeps (a real stall observed).
++                // Re-arm explicitly while there is work left.
++                if (ret)
++                    ff_filter_set_ready(ctx, 100);
++                return ret ? 0 : FFERROR_NOT_READY;
++            }
++        }
++        if (!s->studied)
++            offline_study(ctx);
++        ret = offline_emit(inlink);
++        if (ret < 0)
++            return ret;
++        if (ret)
++            ff_filter_set_ready(ctx, 100);
++        if (!ret) {
++            // Queue exhausted and stretcher drained: forward the input
++            // EOF held since phase 1, exactly once.
++            FF_FILTER_FORWARD_STATUS(inlink, outlink);
++            s->eof_out = 1;
++        }
++        return 0;
++    }
++
+     ret = ff_inlink_consume_samples(inlink, s->nb_samples, s->nb_samples, &in);
+     if (ret < 0)
+         return ret;
+@@ -180,6 +357,9 @@
+     if (ret < 0)
+         return ret;
+ 
++    if (s->offline && s->studied)
++        // Ratios freeze once the offline study pass has begun.
++        return AVERROR(EINVAL);
+     rubberband_set_time_ratio(s->rbs, 1. / s->tempo);
+     rubberband_set_pitch_scale(s->rbs, s->pitch);
+     s->nb_samples = rubberband_get_samples_required(s->rbs);
