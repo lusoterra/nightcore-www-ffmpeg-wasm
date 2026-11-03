@@ -136,6 +136,16 @@ EOF
   mark rubberband
 }
 
+if [ "${NONFREE:-0}" = "1" ]; then
+  echo "==> fdk-aac (nonfree)"
+  done_mark fdk-aac || {
+    rm -rf "$SRC/fdk-aac-2.0.2"*
+    curl -fSL "https://github.com/mstorsjo/fdk-aac/archive/v2.0.2.tar.gz" | tar -xz -C "$SRC"
+    (cd "$SRC/fdk-aac-2.0.2" && autoreconf -fiv >/dev/null 2>&1; emconfigure ./configure --prefix="$PREFIX" --host=i686-linux --disable-shared --disable-dependency-tracking >/dev/null && emmake make -j"$JOBS" >/dev/null && emmake make install >/dev/null)
+    mark fdk-aac
+  }
+fi
+
 echo "==> ffmpeg $FFMPEG_VERSION"
 [ -d "$SRC/ffmpeg" ] || git clone --depth 1 --branch "n$FFMPEG_VERSION" https://github.com/FFmpeg/FFmpeg.git "$SRC/ffmpeg"
 if [ ! -f "$SRC/ffmpeg/.patched-progress" ]; then
@@ -151,7 +161,11 @@ if [ ! -f "$SRC/ffmpeg/.patched-rb-offline" ]; then
     && touch "$SRC/ffmpeg/.patched-rb-offline"
 fi
 # shellcheck disable=SC1091
-source ffmpeg-config.sh # sets CONFIGURE_FLAGS
+if [ "${NONFREE:-0}" = "1" ]; then
+  source ffmpeg-config-nonfree.sh # sets CONFIGURE_FLAGS (non-redistributable)
+else
+  source ffmpeg-config.sh # sets CONFIGURE_FLAGS
+fi
 (cd "$SRC/ffmpeg" && emconfigure ./configure "${CONFIGURE_FLAGS[@]}" \
   --cc=emcc --cxx=em++ --ar=emar --ranlib=emranlib --nm=emnm \
   --extra-cflags="-I$PREFIX/include" --extra-ldflags="-L$PREFIX/lib" \
@@ -177,7 +191,7 @@ emcc -c "$ROOT/bridge/bridge.c" $CFLAGS -Qunused-arguments -o "$FF_O/bridge.o"
   -Llibavcodec -Llibavdevice -Llibavfilter -Llibavformat -Llibavutil -Llibswscale -Llibswresample -Llibpostproc -L"$PREFIX/lib" \
   -Qunused-arguments \
   -lavdevice -lavfilter -lavformat -lavcodec -lswscale -lswresample -lavutil -lpostproc \
-  -lmp3lame -lopus -logg -lsoxr -lrubberband -lc++ -lc++abi -lz -lm \
+  -lmp3lame -lopus -logg -lsoxr -lrubberband ${NONFREE:+-lfdk-aac} -lc++ -lc++abi -lz -lm \
   "$FF_O"/*.o \
   -s INVOKE_RUN=0 -s EXIT_RUNTIME=1 -s MODULARIZE=1 \
   -s EXPORT_NAME=createFFmpegCore \
